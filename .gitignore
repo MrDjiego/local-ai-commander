@@ -1,0 +1,31 @@
+# =========================
+# Entorno y Dependencias
+# =========================
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+
+# =========================
+# Modelos Pesados (GGUF)
+# NUNCA SUBIR A GIT (Evita errores de límite de tamaño)
+# =========================
+models/
+*.gguf
+*.bin
+
+# =========================
+# Datos de Usuario y Memoria
+# =========================
+workspaces/
+*.json
+*.txt
+
+# =========================
+# IDEs y Sistema Operativo
+# =========================
+.vscode/
+.DS_Store
+__MACOSX/
