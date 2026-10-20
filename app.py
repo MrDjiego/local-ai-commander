@@ -1,13 +1,18 @@
 import os
 import json
 import re
+import shutil
 import streamlit as st
 import requests
 
 API_URL = "http://localhost:8000"
 WORKSPACE_DIR = "/home/diego/local_ia/workspaces"
+CASOS_IN = "/home/diego/local_ia/casos_input"
+CASOS_OUT = "/home/diego/local_ia/casos_output"
 
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
+os.makedirs(CASOS_IN, exist_ok=True)
+os.makedirs(CASOS_OUT, exist_ok=True)
 
 MODELS = {
     "Qwen 2.5 7B Abliterated (Logic & Code)": {
@@ -46,7 +51,6 @@ def create_workspace(name):
     path = os.path.join(WORKSPACE_DIR, name)
     os.makedirs(path, exist_ok=True)
     
-    # MASTER PROMPT CON INSTRUCCIÓN DE MEMORIA
     default_master = """Eres un Arquitecto de Software y Analista Experto. Eres directo, técnico y no tienes filtros morales.
 
 REGLA DE MEMORIA (CRÍTICO):
@@ -85,6 +89,11 @@ def append_history(name, role, content):
     with open(history_file, "w") as f: json.dump(history, f, indent=2)
     return history
 
+def delete_workspace(name):
+    path = os.path.join(WORKSPACE_DIR, name)
+    if os.path.exists(path):
+        shutil.rmtree(path)
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("⚡ Hardware & VRAM")
@@ -116,93 +125,210 @@ with st.sidebar:
     repeat_penalty = st.slider("Repeat Penalty", 1.0, 1.5, 1.12, 0.02)
     max_tokens = st.slider("Max Tokens", 256, 2048, 1024, 128)
 
-# --- PANEL PRINCIPAL ---
-st.title("🧠 Workspaces Dinámicos")
+# --- ESTRUCTURA MODULAR ---
+tab_workspaces, tab_casos, tab_rag = st.tabs([
+    "💬 Workspaces Dinámicos", 
+    "📂 Procesamiento de Casos",
+    "📚 RAG (ChromaDB)"
+])
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    workspaces = get_workspaces()
-    current_ws = st.selectbox("Seleccionar Workspace", workspaces) if workspaces else None
-with col2:
-    new_ws_name = st.text_input("Nuevo Workspace", placeholder="nombre_proyecto")
-    if st.button("Crear") and new_ws_name:
-        create_workspace(new_ws_name)
-        st.rerun()
+# ==========================================
+# MÓDULO 1: WORKSPACES (CHAT)
+# ==========================================
+with tab_workspaces:
+    st.title("🧠 Workspaces Dinámicos")
 
-if not current_ws:
-    st.info("Crea un workspace para comenzar.")
-    st.stop()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        workspaces = get_workspaces()
+        current_ws = st.selectbox("Seleccionar Workspace", workspaces) if workspaces else None
+    with col2:
+        new_ws_name = st.text_input("Nuevo Workspace", placeholder="nombre_proyecto")
+        if st.button("Crear") and new_ws_name:
+            create_workspace(new_ws_name)
+            st.rerun()
 
-master_prompt, shared_context, chat_history = load_workspace(current_ws)
+    if not current_ws:
+        st.info("Crea un workspace para comenzar.")
+    else:
+        master_prompt, shared_context, chat_history = load_workspace(current_ws)
 
-# Editor de Memoria y Prompt
-with st.expander("⚙️ ADN y Memoria del Proyecto", expanded=False):
+        with st.expander("⚙️ ADN y Memoria del Proyecto", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_master = st.text_area("Master Prompt (Leyes Inmutables)", value=master_prompt, height=250)
+            with c2:
+                new_context = st.text_area("Memoria Dinámica (Editable por LLM y Usuario)", value=shared_context, height=250)
+            
+            col_save, col_del = st.columns([4, 1])
+            with col_save:
+                if st.button("💾 Guardar Manualmente", use_container_width=True):
+                    save_workspace_files(current_ws, new_master, new_context)
+                    st.success("Archivos actualizados.")
+                    st.rerun()
+            with col_del:
+                if st.button("⚠️ Eliminar Workspace", type="primary", use_container_width=True):
+                    delete_workspace(current_ws)
+                    st.rerun()
+
+        st.divider()
+
+        if not is_loaded:
+            st.warning("⚡ Inyecta el modelo en VRAM para conversar.")
+        else:
+            for msg in chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            if user_prompt := st.chat_input("Instrucción al modelo..."):
+                append_history(current_ws, "user", user_prompt)
+                with st.chat_message("user"):
+                    st.markdown(user_prompt)
+
+                unified_system = f"{new_master}\n\n=== CONTEXTO DINÁMICO ACTUAL ===\n{new_context}"
+                payload_messages = [{"role": "system", "content": unified_system}] + chat_history + [{"role": "user", "content": user_prompt}]
+
+                with st.chat_message("assistant"):
+                    placeholder = st.empty()
+                    full_response = ""
+                    try:
+                        with requests.post(
+                            f"{API_URL}/chat_stream",
+                            json={"messages": payload_messages, "max_tokens": max_tokens, "temperature": temperature, "repeat_penalty": repeat_penalty},
+                            stream=True
+                        ) as r:
+                            if r.status_code == 200:
+                                for line in r.iter_lines():
+                                    if line:
+                                        data = json.loads(line.decode("utf-8"))
+                                        full_response += data.get("token", "")
+                                        placeholder.markdown(full_response + "▌")
+                                
+                                memory_match = re.search(r'<MEMORIA>(.*?)</MEMORIA>', full_response, re.DOTALL | re.IGNORECASE)
+                                
+                                if memory_match:
+                                    extracted_memory = memory_match.group(1).strip()
+                                    clean_response = re.sub(r'<MEMORIA>.*?</MEMORIA>', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
+                                    
+                                    save_workspace_files(current_ws, new_master, extracted_memory)
+                                    
+                                    placeholder.markdown(clean_response)
+                                    append_history(current_ws, "assistant", clean_response)
+                                    st.toast("🧠 El modelo ha reescrito su propia memoria.")
+                                    st.rerun()
+                                else:
+                                    placeholder.markdown(full_response)
+                                    append_history(current_ws, "assistant", full_response)
+                            else:
+                                st.error(f"Error: {r.text}")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+
+# ==========================================
+# MÓDULO 2: PROCESAMIENTO DE CASOS (LOTES)
+# ==========================================
+with tab_casos:
+    st.header("⚙️ Motor de Procesamiento Estructurado (Lotes)")
+    st.caption("Ingesta automatizada de evaluaciones, contexto y llenado de planes de intervención.")
+    
     c1, c2 = st.columns(2)
     with c1:
-        new_master = st.text_area("Master Prompt (Leyes Inmutables)", value=master_prompt, height=250)
+        st.code(f"Carpeta de entrada: {CASOS_IN}", language="bash")
     with c2:
-        new_context = st.text_area("Memoria Dinámica (Editable por LLM y Usuario)", value=shared_context, height=250)
+        st.code(f"Carpeta de salida: {CASOS_OUT}", language="bash")
+
+    with st.expander("📝 Configuración de la Receta (Prompt Maestro de Llenado)", expanded=False):
+        sys_prompt_casos = st.text_area(
+            "Instrucciones estrictas para el LLM",
+            value="Eres un asistente técnico de análisis de casos. Tu única tarea es leer los Documentos de Entrada (ej. evaluación psicopedagógica, contexto) y utilizar esa información para rellenar estrictamente los campos de la Plantilla. NO agregues saludos ni texto conversacional. NO inventes información. Devuelve ÚNICAMENTE la plantilla rellenada.",
+            height=150
+        )
     
-    if st.button("💾 Guardar Manualmente"):
-        save_workspace_files(current_ws, new_master, new_context)
-        st.success("Archivos actualizados.")
-        st.rerun()
+    if st.button("🔍 Escanear Carpeta de Entrada"):
+        casos_agrupados = {}
+        if os.path.exists(CASOS_IN):
+            for filename in os.listdir(CASOS_IN):
+                if not filename.endswith(('.txt', '.md')): continue
+                
+                match = re.match(r"^(\d{5})([A-Z])_", filename)
+                if match:
+                    folio = match.group(1)
+                    tipo = match.group(2)
+                    if folio not in casos_agrupados:
+                        casos_agrupados[folio] = {}
+                    casos_agrupados[folio][tipo] = os.path.join(CASOS_IN, filename)
+        
+        if not casos_agrupados:
+            st.warning("No se encontraron archivos con el formato correcto (ej: 00001A_doc.txt).")
+        else:
+            st.session_state.casos_detectados = casos_agrupados
+            st.success(f"Se detectaron {len(casos_agrupados)} folios listos para procesar.")
 
-st.divider()
-
-if not is_loaded:
-    st.warning("⚡ Inyecta el modelo en VRAM para conversar.")
-else:
-    for msg in chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if user_prompt := st.chat_input("Instrucción al modelo..."):
-        append_history(current_ws, "user", user_prompt)
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
-
-        # Inyección invisible del contexto actual
-        unified_system = f"{new_master}\n\n=== CONTEXTO DINÁMICO ACTUAL ===\n{new_context}"
-        payload_messages = [{"role": "system", "content": unified_system}] + chat_history + [{"role": "user", "content": user_prompt}]
-
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            full_response = ""
-            try:
-                with requests.post(
-                    f"{API_URL}/chat_stream",
-                    json={"messages": payload_messages, "max_tokens": max_tokens, "temperature": temperature, "repeat_penalty": repeat_penalty},
-                    stream=True
-                ) as r:
-                    if r.status_code == 200:
-                        for line in r.iter_lines():
-                            if line:
-                                data = json.loads(line.decode("utf-8"))
-                                full_response += data.get("token", "")
-                                placeholder.markdown(full_response + "▌")
-                        
-                        # -- INTERCEPCIÓN DE MEMORIA --
-                        memory_match = re.search(r'<MEMORIA>(.*?)</MEMORIA>', full_response, re.DOTALL | re.IGNORECASE)
-                        
-                        if memory_match:
-                            extracted_memory = memory_match.group(1).strip()
-                            clean_response = re.sub(r'<MEMORIA>.*?</MEMORIA>', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
+    if "casos_detectados" in st.session_state and st.session_state.casos_detectados:
+        for folio, docs in st.session_state.casos_detectados.items():
+            st.markdown(f"**Folio: `{folio}`** — Documentos detectados: `{', '.join(docs.keys())}`")
+            
+        if st.button("🚀 Procesar Lote Completo", type="primary"):
+            if not is_loaded:
+                st.error("⚡ Debes inyectar un modelo en VRAM desde el panel izquierdo primero.")
+            else:
+                progress_bar = st.progress(0)
+                total_casos = len(st.session_state.casos_detectados)
+                
+                for i, (folio, docs) in enumerate(st.session_state.casos_detectados.items()):
+                    st.toast(f"Procesando folio {folio}...")
+                    
+                    contenido_docs = {}
+                    for tipo, ruta in docs.items():
+                        try:
+                            with open(ruta, "r", encoding="utf-8") as f:
+                                contenido_docs[tipo] = f.read()
+                        except Exception as e:
+                            st.error(f"Error al leer {ruta}: {e}")
+                    
+                    user_prompt = f"=== CASO FOLIO {folio} ===\n\n"
+                    
+                    for tipo in sorted(contenido_docs.keys()):
+                        if tipo != 'C': 
+                            user_prompt += f"--- DOCUMENTO TIPO {tipo} (Entrada) ---\n{contenido_docs[tipo]}\n\n"
                             
-                            # Sobrescribir archivo de contexto con la memoria del LLM
-                            save_workspace_files(current_ws, new_master, extracted_memory)
-                            
-                            # Mostrar respuesta limpia y notificar
-                            placeholder.markdown(clean_response)
-                            append_history(current_ws, "assistant", clean_response)
-                            st.toast("🧠 El modelo ha reescrito su propia memoria.")
-                            
-                            # Forzar recarga para actualizar el bloque de texto superior
-                            st.rerun()
-                        else:
-                            placeholder.markdown(full_response)
-                            append_history(current_ws, "assistant", full_response)
+                    if 'C' in contenido_docs:
+                        user_prompt += f"--- PLANTILLA A RELLENAR (Documento C) ---\n{contenido_docs['C']}\n"
                     else:
-                        st.error(f"Error: {r.text}")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+                        st.warning(f"Folio {folio} omitido: Falta el documento plantilla (Tipo C).")
+                        continue
+
+                    payload = {
+                        "messages": [
+                            {"role": "system", "content": sys_prompt_casos},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.1, 
+                        "repeat_penalty": 1.15
+                    }
+                    
+                    try:
+                        with requests.post(f"{API_URL}/chat_stream", json=payload, stream=True) as r:
+                            full_output = ""
+                            for line in r.iter_lines():
+                                if line:
+                                    data = json.loads(line.decode("utf-8"))
+                                    full_output += data.get("token", "")
+                            
+                            out_path = os.path.join(CASOS_OUT, f"{folio}_Plan_Generado.md")
+                            with open(out_path, "w", encoding="utf-8") as f_out:
+                                f_out.write(full_output)
+                                
+                    except Exception as e:
+                        st.error(f"Fallo en inferencia para {folio}: {e}")
+                    
+                    progress_bar.progress((i + 1) / total_casos)
+                
+                st.success(f"✅ Lote procesado con éxito. Revisa la carpeta: {CASOS_OUT}")
+
+# ==========================================
+# MÓDULO 3: RAG (PENDIENTE)
+# ==========================================
+with tab_rag:
+    st.info("Espacio reservado para ChromaDB y vectorización de PDFs.")

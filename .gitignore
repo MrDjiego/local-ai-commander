@@ -29,3 +29,8 @@ workspaces/
 .vscode/
 .DS_Store
 __MACOSX/
+# =========================
+# Datos Sensibles y Expedientes
+# =========================
+casos_input/
+casos_output/
